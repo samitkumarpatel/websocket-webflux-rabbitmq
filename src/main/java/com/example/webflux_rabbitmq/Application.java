@@ -202,11 +202,7 @@ class WebSocketConfiguration {
 					.filter(StringUtils::hasText);
 
 			Mono<Void> output = session.send(source.map(session::textMessage))
-					.doOnError(error -> log.error("WebSocket send failed for queue {}", queueName, error))
-					.doFinally(signal -> {
-						rabbitAdmin.deleteQueue(queueName);
-						log.info("Deleted queue {} with signal {}", queueName, signal);
-					});
+					.doOnError(error -> log.error("WebSocket send failed for queue {}", queueName, error));
 
 
 
