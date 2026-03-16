@@ -124,89 +124,48 @@ class WebSocketConfiguration {
 	public HandlerMapping handlerMapping() {
 		Map<String, WebSocketHandler> map = new HashMap<>();
 		map.put("/ws", session -> {
-			//get the roomId from URI ws://localhost:8080/ws?roomId=abc1123A
+			// get the roomId from URI ws://localhost:8080/ws?roomId=abc1123A
 			String roomId = session.getHandshakeInfo().getUri().getQuery().split("=")[1];
-			log.info("RoomId : {}",roomId);
+			log.info("RoomId : {}", roomId);
 
 			var queueName = "ws.%s.%s".formatted(roomId, UUID.randomUUID().toString());
 			var exchange = "room.%s.events".formatted(roomId);
-			//create a queue and attached to the Exchange
-			var queue = QueueBuilder.nonDurable(queueName).exclusive().autoDelete().build();
+
+			// Create a queue and bind it to the exchange.
+			// Do NOT use exclusive() — the reactor-rabbitmq Receiver opens its own AMQP
+			// connection; exclusive queues are locked to the declaring connection, so the
+			// Receiver would receive ACCESS_REFUSED and the consume flux would never emit.
+			var queue = QueueBuilder.nonDurable(queueName).autoDelete().build();
 			rabbitAdmin.declareQueue(queue);
 			rabbitAdmin.declareBinding(BindingBuilder.bind(queue).to(new FanoutExchange(exchange)));
 
-
-			/*
-			//send message to the queue if any
-			var input = session.receive()
-					.map(WebSocketMessage::getPayloadAsText);
-
-			//after receive a message , put that in the exchange/queue
-
-			//consume the queue
-			Flux<String> source = input.map(message -> "["+Instant.now()+"]: "+ message);
-
-			return session.send(source.map(session::textMessage));
-
-			*/
-
-			/*
-
-			//add message to the queue
-			Mono<Void> input = session.receive()
-					.map(WebSocketMessage::getPayloadAsText)
-					.doOnNext(message -> {
-						log.info("session.receive() :: {}", message);
-						var props = new AMQP.BasicProperties.Builder()
-								.contentType(MediaType.TEXT_PLAIN_VALUE)
-								.deliveryMode(1) // non-persistent for speed
-								.build();
-						var messageToQueue = new OutboundMessage(
-								exchange,
-								"",   // routing key ignored for fan-out
-								props,
-								message.getBytes()
-						);
-						sender.send(Mono.just(messageToQueue));
-					})
-					.then();
-
-			//listen to the exchange
-			Flux<String> source = receiver.consumeAutoAck(queueName)
-					.mapNotNull(Delivery::getBody)
-					.map(String::new)
-					.filter(StringUtils::hasText)
-					.doOnCancel(() -> {
-						// Clean up queue when WebSocket disconnects
-						rabbitAdmin.deleteQueue(queueName);
-						log.info("Deleted queue {}", queueName);
-					});
-
-			Mono<Void> output = session.send(source.map(session::textMessage));
-
-			return input.and(output);
-
-			 */
 			var props = new AMQP.BasicProperties.Builder()
 					.contentType(MediaType.TEXT_PLAIN_VALUE)
 					.deliveryMode(1) // non-persistent for speed
 					.build();
 
-			Flux<OutboundMessage> outbound = session.receive()
+			// Inbound: WebSocket → RabbitMQ exchange
+			Mono<Void> input = session.receive()
 					.map(WebSocketMessage::getPayloadAsText)
-					.map(message -> new OutboundMessage(exchange, "", props, message.getBytes(StandardCharsets.UTF_8)));
+					.flatMap(message -> sender.send(
+							Mono.just(new OutboundMessage(exchange, "", props, message.getBytes(StandardCharsets.UTF_8)))
+					))
+					.then();
 
-			Flux<String> source = receiver.consumeAutoAck(queueName)
+			// Outbound: RabbitMQ queue → WebSocket
+			Flux<WebSocketMessage> outputMessages = receiver.consumeAutoAck(queueName)
 					.mapNotNull(Delivery::getBody)
 					.map(body -> new String(body, StandardCharsets.UTF_8))
-					.filter(StringUtils::hasText);
+					.filter(StringUtils::hasText)
+					.doFinally(signal -> {
+						log.info("Cleaning up queue {} (signal: {})", queueName, signal);
+						rabbitAdmin.deleteQueue(queueName);
+					})
+					.map(session::textMessage);
 
-			Mono<Void> output = session.send(source.map(session::textMessage))
-					.doOnError(error -> log.error("WebSocket send failed for queue {}", queueName, error));
-
-
-
-			return sender.send(outbound).and(output).then();
+			return session.send(outputMessages)
+					.doOnError(error -> log.error("WebSocket send failed for queue {}", queueName, error))
+					.and(input);
 		});
 		int order = -1; // before annotated controllers
 
