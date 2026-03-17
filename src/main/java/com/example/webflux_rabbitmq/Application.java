@@ -1,40 +1,32 @@
 package com.example.webflux_rabbitmq;
 
-import com.rabbitmq.client.AMQP;
 import com.rabbitmq.client.ConnectionFactory;
-import com.rabbitmq.client.Delivery;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.amqp.core.BindingBuilder;
-import org.springframework.amqp.core.ExchangeBuilder;
-import org.springframework.amqp.core.FanoutExchange;
-import org.springframework.amqp.core.QueueBuilder;
 import org.springframework.amqp.rabbit.core.RabbitAdmin;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.data.annotation.Id;
-import org.springframework.data.mongodb.core.mapping.Document;
-import org.springframework.data.mongodb.repository.ReactiveMongoRepository;
-import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
-import org.springframework.util.StringUtils;
 import org.springframework.web.reactive.HandlerMapping;
+import org.springframework.web.reactive.function.client.WebClient;
+import org.springframework.web.reactive.function.client.support.WebClientAdapter;
 import org.springframework.web.reactive.function.server.RouterFunction;
 import org.springframework.web.reactive.function.server.RouterFunctions;
 import org.springframework.web.reactive.function.server.ServerRequest;
 import org.springframework.web.reactive.function.server.ServerResponse;
 import org.springframework.web.reactive.handler.SimpleUrlHandlerMapping;
 import org.springframework.web.reactive.socket.WebSocketHandler;
-import org.springframework.web.reactive.socket.WebSocketMessage;
-import reactor.core.publisher.Flux;
+import org.springframework.web.service.annotation.GetExchange;
+import org.springframework.web.service.annotation.HttpExchange;
+import org.springframework.web.service.invoker.HttpServiceProxyFactory;
 import reactor.core.publisher.Mono;
 import reactor.rabbitmq.*;
 
-import java.nio.charset.StandardCharsets;
-import java.time.Instant;
-import java.util.*;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 
 @SpringBootApplication
 public class Application {
@@ -64,52 +56,40 @@ public class Application {
 	}
 
 	@Bean
+	UserHttpClient userHttpClient(WebClient.Builder webClientbuilder) {
+		WebClientAdapter adapter = WebClientAdapter.create(WebClient.builder().build());
+		HttpServiceProxyFactory factory = HttpServiceProxyFactory.builderFor(adapter).build();
+		return factory.createClient(UserHttpClient.class);
+	}
+
+	@Bean
 	RouterFunction<ServerResponse> routerFunction(RouterHandler routerHandler) {
 		return RouterFunctions
 				.route()
-				.POST("/room", routerHandler::createNewRoom)
+				.GET("/users", routerHandler::fetchAllUser)
 				.build();
 	}
 }
-
-@Document
-record Room(@Id String id, String title, Instant createdAt) {
-	public Room(String id, String title) {
-        this(id, title, Instant.now());
-    }
-
-	public Room withId(String id) {
-		return new Room(id, this.title, Instant.now());
-	}
-}
-
-interface RoomRepository extends ReactiveMongoRepository<Room, String> {}
 
 @Component
 @RequiredArgsConstructor
 class RouterHandler {
 	private final RabbitAdmin rabbitAdmin;
-	private final RoomRepository roomRepository;
+	private final UserHttpClient userHttpClient;
 
-	public Mono<ServerResponse> createNewRoom(ServerRequest request) {
-		return request
-				.bodyToMono(Room.class)
-				.map(body -> new Room(null, body.title()))
-				.flatMap(roomRepository::save)
-				.doOnNext(dbRoom -> rabbitAdmin
-						.declareExchange(
-								ExchangeBuilder
-										.fanoutExchange(formatExchange(dbRoom.id()))
-										.durable(true)
-										.build()
-						)
-				)
+	public Mono<ServerResponse> fetchAllUser(ServerRequest request) {
+		return userHttpClient
+				.allUser()
 				.flatMap(ServerResponse.ok()::bodyValue);
 	}
+}
 
-    private String formatExchange(String id) {
-        return "room.%s.events".formatted(id);
-    }
+record User(String id, String name, String username, String email, String phone, String website) {}
+
+@HttpExchange(url = "https://jsonplaceholder.typicode.com")
+interface UserHttpClient {
+	@GetExchange("/users")
+	Mono<List<User>> allUser();
 }
 
 @Configuration
@@ -123,49 +103,10 @@ class WebSocketConfiguration {
 	@Bean
 	public HandlerMapping handlerMapping() {
 		Map<String, WebSocketHandler> map = new HashMap<>();
-		map.put("/ws", session -> {
-			// get the roomId from URI ws://localhost:8080/ws?roomId=abc1123A
-			String roomId = session.getHandshakeInfo().getUri().getQuery().split("=")[1];
-			log.info("RoomId : {}", roomId);
+		map.put("/ws/chat-room", session -> {
 
-			var queueName = "ws.%s.%s".formatted(roomId, UUID.randomUUID().toString());
-			var exchange = "room.%s.events".formatted(roomId);
-
-			// Create a queue and bind it to the exchange.
-			// Do NOT use exclusive() — the reactor-rabbitmq Receiver opens its own AMQP
-			// connection; exclusive queues are locked to the declaring connection, so the
-			// Receiver would receive ACCESS_REFUSED and the consume flux would never emit.
-			var queue = QueueBuilder.nonDurable(queueName).autoDelete().build();
-			rabbitAdmin.declareQueue(queue);
-			rabbitAdmin.declareBinding(BindingBuilder.bind(queue).to(new FanoutExchange(exchange)));
-
-			var props = new AMQP.BasicProperties.Builder()
-					.contentType(MediaType.TEXT_PLAIN_VALUE)
-					.deliveryMode(1) // non-persistent for speed
-					.build();
-
-			// Inbound: WebSocket → RabbitMQ exchange
-			Mono<Void> input = session.receive()
-					.map(WebSocketMessage::getPayloadAsText)
-					.flatMap(message -> sender.send(
-							Mono.just(new OutboundMessage(exchange, "", props, message.getBytes(StandardCharsets.UTF_8)))
-					))
-					.then();
-
-			// Outbound: RabbitMQ queue → WebSocket
-			Flux<WebSocketMessage> outputMessages = receiver.consumeAutoAck(queueName)
-					.mapNotNull(Delivery::getBody)
-					.map(body -> new String(body, StandardCharsets.UTF_8))
-					.filter(StringUtils::hasText)
-					.doFinally(signal -> {
-						log.info("Cleaning up queue {} (signal: {})", queueName, signal);
-						rabbitAdmin.deleteQueue(queueName);
-					})
-					.map(session::textMessage);
-
-			return session.send(outputMessages)
-					.doOnError(error -> log.error("WebSocket send failed for queue {}", queueName, error))
-					.and(input);
+			
+			return session.receive().then();
 		});
 		int order = -1; // before annotated controllers
 
