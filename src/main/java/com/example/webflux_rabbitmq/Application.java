@@ -126,15 +126,14 @@ class WebSocketConfiguration {
 		map.put("/ws", session -> {
 			// get the roomId from URI ws://localhost:8080/ws?roomId=abc1123A
 			String roomId = session.getHandshakeInfo().getUri().getQuery().split("=")[1];
-			log.info("RoomId : {}", roomId);
+			log.info("RoomId from ws URI: {}", roomId);
 
-			var queueName = "ws.%s.%s".formatted(roomId, UUID.randomUUID().toString());
 			var exchange = "room.%s.events".formatted(roomId);
+			var queueName = "ws.%s.%s".formatted(roomId, UUID.randomUUID().toString());
+
 
 			// Create a queue and bind it to the exchange.
-			// Do NOT use exclusive() — the reactor-rabbitmq Receiver opens its own AMQP
-			// connection; exclusive queues are locked to the declaring connection, so the
-			// Receiver would receive ACCESS_REFUSED and the consume flux would never emit.
+			// Do NOT use exclusive() — the reactor-rabbitmq Receiver opens its own AMQP connection; exclusive queues are locked to the declaring connection, so the Receiver would receive ACCESS_REFUSED and the consume flux would never emit.
 			var queue = QueueBuilder.nonDurable(queueName).autoDelete().build();
 			rabbitAdmin.declareQueue(queue);
 			rabbitAdmin.declareBinding(BindingBuilder.bind(queue).to(new FanoutExchange(exchange)));
@@ -144,16 +143,15 @@ class WebSocketConfiguration {
 					.deliveryMode(1) // non-persistent for speed
 					.build();
 
-			// Inbound: WebSocket → RabbitMQ exchange
-			Mono<Void> input = session.receive()
+			// Incoming WebSocket message to be sent to RabbitMQ exchange
+			Mono<Void> input = session
+					.receive()
 					.map(WebSocketMessage::getPayloadAsText)
-					.flatMap(message -> sender.send(
-							Mono.just(new OutboundMessage(exchange, "", props, message.getBytes(StandardCharsets.UTF_8)))
-					))
+					.flatMap(message -> sender.send(Mono.fromCallable(() -> new OutboundMessage(exchange, "", props, message.getBytes(StandardCharsets.UTF_8)))))
 					.then();
 
-			// Outbound: RabbitMQ queue → WebSocket
-			Flux<WebSocketMessage> outputMessages = receiver.consumeAutoAck(queueName)
+			// Websocket session has to subscribe to their respective RabbitMQ queue to receive messages published to the exchange.
+			Flux<WebSocketMessage> messageFromQueue = receiver.consumeAutoAck(queueName)
 					.mapNotNull(Delivery::getBody)
 					.map(body -> new String(body, StandardCharsets.UTF_8))
 					.filter(StringUtils::hasText)
@@ -163,12 +161,12 @@ class WebSocketConfiguration {
 					})
 					.map(session::textMessage);
 
-			return session.send(outputMessages)
-					.doOnError(error -> log.error("WebSocket send failed for queue {}", queueName, error))
+			return session.send(messageFromQueue)
+					.doOnError(error -> log.error("WebSocket message failed to send after consuming message from queue {}", queueName, error))
 					.and(input);
 		});
-		int order = -1; // before annotated controllers
 
+		int order = -1; // before annotated controllers
 		return new SimpleUrlHandlerMapping(map, order);
 	}
 }
