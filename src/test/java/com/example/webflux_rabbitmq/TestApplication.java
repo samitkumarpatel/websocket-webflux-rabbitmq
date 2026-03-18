@@ -1,5 +1,6 @@
 package com.example.webflux_rabbitmq;
 
+import com.Application;
 import org.springframework.boot.SpringApplication;
 
 public class TestApplication {
