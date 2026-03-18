@@ -5,7 +5,6 @@ import com.rabbitmq.client.ConnectionFactory;
 import com.rabbitmq.client.Delivery;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.amqp.core.Binding;
 import org.springframework.amqp.core.BindingBuilder;
 import org.springframework.amqp.core.ExchangeBuilder;
 import org.springframework.amqp.core.FanoutExchange;
@@ -15,6 +14,9 @@ import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.data.annotation.Id;
+import org.springframework.data.mongodb.core.mapping.Document;
+import org.springframework.data.mongodb.repository.ReactiveMongoRepository;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 import org.springframework.web.reactive.HandlerMapping;
@@ -42,6 +44,7 @@ import tools.jackson.databind.json.JsonMapper;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -86,6 +89,7 @@ public class Application {
 		return RouterFunctions
 				.route()
 				.GET("/users", routerHandler::fetchAllUser)
+				.GET("/user/{currentUser}/{selectedUser}/conversation", routerHandler::fetchConversation)
 				.build();
 	}
 }
@@ -93,12 +97,25 @@ public class Application {
 @Component
 @RequiredArgsConstructor
 class RouterHandler {
-	private final RabbitAdmin rabbitAdmin;
 	private final UserHttpClient userHttpClient;
+	private final MessageRepository messageRepository;
 
 	public Mono<ServerResponse> fetchAllUser(ServerRequest request) {
 		return userHttpClient
 				.allUser()
+				.flatMap(ServerResponse.ok()::bodyValue);
+	}
+
+	public Mono<ServerResponse> fetchConversation(ServerRequest request) {
+		String currentUser = request.pathVariable("currentUser");
+		String selectedUser = request.pathVariable("selectedUser");
+		// Fetch both directions: A→B and B→A, then merge and sort by timestamp
+		return Flux.merge(
+						messageRepository.findAllByToUserIdAndFromUserId(selectedUser, currentUser),
+						messageRepository.findAllByToUserIdAndFromUserId(currentUser, selectedUser)
+				)
+				.sort(Comparator.comparing(Message::timestamp))
+				.collectList()
 				.flatMap(ServerResponse.ok()::bodyValue);
 	}
 }
@@ -111,10 +128,28 @@ interface UserHttpClient {
 	Mono<List<User>> allUser();
 }
 
-record Message(String toUserId, String fromUserId, String text, Instant timestamp) {
-	public Message(String toUserId, String fromUserId, String text) {
-		this(toUserId, fromUserId, text, Instant.now());
+@Document
+record Message(@Id String id, String toUserId, String fromUserId, String text, Instant timestamp) {
+
+	public Message (String id, String toUserId, String fromUserId, String text, Instant timestamp) {
+		this.id = id;
+		this.toUserId = toUserId;
+		this.fromUserId = fromUserId;
+		this.text = text;
+		this.timestamp = timestamp != null ? timestamp : Instant.now();
 	}
+
+	public Message(String toUserId, String fromUserId, String text) {
+		this(null, toUserId, fromUserId, text, Instant.now());
+	}
+
+	public Message withId(String id) {
+		return new Message(id, this.toUserId, this.fromUserId, this.text, this.timestamp);
+	}
+}
+
+interface MessageRepository extends ReactiveMongoRepository<Message, String> {
+	Flux<Message> findAllByToUserIdAndFromUserId(String toUserId, String fromUserId);
 }
 
 @Configuration
@@ -127,6 +162,7 @@ class WebSocketConfiguration {
 	private final JsonMapper jsonMapper;
 	private final String exchangeNamePattern = "user.%s.inbox";
 	private final String queueNamePattern = "ws.inbox.%s.%s";
+	private final MessageRepository messageRepository;
 
 	@Bean
 	public HandlerMapping handlerMapping() {
@@ -170,6 +206,8 @@ class WebSocketConfiguration {
 					.map(textMessage -> jsonMapper.readValue(textMessage, Message.class))
 					//save it in the db
 					.map(message -> new Message(message.toUserId(), message.fromUserId(), message.text()))
+					.flatMap(messageRepository::save)
+					.doOnNext(message -> log.info("conversationStore - saved message: {}", message))
 					.flatMap(message -> sender.send(Mono.fromCallable(() -> new OutboundMessage(exchangeNamePattern.formatted(message.toUserId()), "", props, jsonMapper.writeValueAsBytes(message)))))
 					.doOnError(throwable -> log.error("Error while ---publishToRespectiveUserInbox---", throwable))
 					.then();

@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>DM Chat</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: system-ui, sans-serif;
+      background: #f4f4f4;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+    }
+
+    /* ── Landing ── */
+    .landing {
+      background: #fff;
+      border: 1px solid #ddd;
+      border-radius: 8px;
+      padding: 2rem 2.5rem;
+      width: 340px;
+      text-align: center;
+    }
+    .landing h2 { margin-bottom: 1.25rem; font-size: 1.2rem; color: #333; }
+    .landing select {
+      width: 100%;
+      padding: 0.5rem 0.75rem;
+      border: 1px solid #ccc;
+      border-radius: 5px;
+      font-size: 0.95rem;
+      background: #fafafa;
+    }
+    .landing select:focus { outline: none; border-color: #555; }
+
+    /* ── Chat layout ── */
+    .chat-wrap {
+      background: #fff;
+      border: 1px solid #ddd;
+      border-radius: 8px;
+      width: 820px;
+      height: 560px;
+      display: flex;
+      overflow: hidden;
+    }
+
+    /* Left panel */
+    .user-list {
+      width: 220px;
+      border-right: 1px solid #ddd;
+      display: flex;
+      flex-direction: column;
+    }
+    .user-list-header {
+      padding: 0.85rem 1rem;
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: #888;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      border-bottom: 1px solid #eee;
+    }
+    .user-list ul { list-style: none; flex: 1; overflow-y: auto; }
+    .user-list ul li {
+      padding: 0.65rem 1rem;
+      cursor: pointer;
+      font-size: 0.9rem;
+      color: #333;
+      border-bottom: 1px solid #f0f0f0;
+      transition: background 0.15s;
+    }
+    .user-list ul li:hover { background: #f5f5f5; }
+    .user-list ul li.active { background: #efefef; font-weight: 600; }
+    .user-list ul li.me { color: #aaa; cursor: default; font-style: italic; }
+    .user-list ul li.me:hover { background: transparent; }
+
+    /* Right panel */
+    .chat-panel {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+    }
+    .chat-header {
+      padding: 0.85rem 1rem;
+      border-bottom: 1px solid #eee;
+      font-size: 0.9rem;
+      color: #555;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .chat-header strong { color: #222; }
+    .ws-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: #bbb;
+      display: inline-block;
+      flex-shrink: 0;
+    }
+    .ws-dot.connected { background: #4caf50; }
+
+    .messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 1rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      background: #fafafa;
+    }
+    .msg {
+      max-width: 68%;
+      padding: 0.45rem 0.75rem;
+      border-radius: 12px;
+      font-size: 0.875rem;
+      line-height: 1.45;
+      word-break: break-word;
+    }
+    .msg.sent {
+      align-self: flex-end;
+      background: #333;
+      color: #fff;
+      border-bottom-right-radius: 3px;
+    }
+    .msg.received {
+      align-self: flex-start;
+      background: #e8e8e8;
+      color: #222;
+      border-bottom-left-radius: 3px;
+    }
+    .msg .meta {
+      font-size: 0.7rem;
+      margin-top: 3px;
+      opacity: 0.55;
+    }
+    .msg.sent .meta { text-align: right; }
+
+    .no-chat {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #bbb;
+      font-size: 0.9rem;
+      background: #fafafa;
+    }
+
+    /* Input bar */
+    .input-bar {
+      display: flex;
+      gap: 0.5rem;
+      padding: 0.65rem 0.75rem;
+      border-top: 1px solid #eee;
+      background: #fff;
+    }
+    .input-bar input {
+      flex: 1;
+      padding: 0.45rem 0.7rem;
+      border: 1px solid #ccc;
+      border-radius: 5px;
+      font-size: 0.9rem;
+    }
+    .input-bar input:focus { outline: none; border-color: #555; }
+    .input-bar button {
+      padding: 0.45rem 1rem;
+      border: none;
+      border-radius: 5px;
+      background: #333;
+      color: #fff;
+      font-size: 0.875rem;
+      cursor: pointer;
+    }
+    .input-bar button:disabled { background: #bbb; cursor: not-allowed; }
+  </style>
+</head>
+<body>
+<div id="app"></div>
+
+<!-- Vue 3 CDN -->
+<script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+
+<script>
+const { createApp, ref, computed, watch, onMounted, onUnmounted, nextTick } = Vue
+
+// ── Landing component ──────────────────────────────────────────────
+const Landing = {
+  emits: ['user-selected'],
+  setup(_, { emit }) {
+    const users   = ref([])
+    const loading = ref(true)
+    const error   = ref(null)
+
+    onMounted(async () => {
+      try {
+        const res = await fetch('/users')
+        if (!res.ok) throw new Error('Failed to load users')
+        users.value = await res.json()
+      } catch (e) {
+        error.value = e.message
+      } finally {
+        loading.value = false
+      }
+    })
+
+    function onSelect(e) {
+      const id = e.target.value
+      if (!id) return
+      const user = users.value.find(u => String(u.id) === String(id))
+      if (user) emit('user-selected', user)
+    }
+
+    return { users, loading, error, onSelect }
+  },
+  template: `
+    <div class="landing">
+      <h2>Who are you?</h2>
+      <p v-if="loading" style="color:#888;font-size:.875rem">Loading users…</p>
+      <p v-else-if="error" style="color:#c00;font-size:.875rem">{{ error }}</p>
+      <select v-else @change="onSelect">
+        <option value="">— select a user —</option>
+        <option v-for="u in users" :key="u.id" :value="u.id">
+          {{ u.name }} ({{ u.username }})
+        </option>
+      </select>
+    </div>
+  `
+}
+
+// ── Chat component ─────────────────────────────────────────────────
+const Chat = {
+  props: {
+    currentUser: { type: Object, required: true }
+  },
+  setup(props) {
+    const users        = ref([])
+    const selectedUser = ref(null)
+    const messages     = ref([])
+    const inputText    = ref('')
+    const wsConnected  = ref(false)
+    const messagesEl   = ref(null)
+
+    // Buffer for messages that arrive while a different (or no) conversation is open
+    // keyed by the OTHER party's userId
+    const pendingByUser = ref({})
+
+    let ws = null
+
+    // Connect WebSocket for the current (logged-in) user
+    function connectWs() {
+      if (ws) ws.close()
+      ws = new WebSocket(`ws://localhost:8080/ws/chat?userId=${props.currentUser.id}`)
+      ws.onopen    = () => { wsConnected.value = true }
+      ws.onclose   = () => { wsConnected.value = false }
+      ws.onerror   = () => { wsConnected.value = false }
+      ws.onmessage = (e) => {
+        try {
+          const msg = JSON.parse(e.data)
+          const cu   = String(props.currentUser.id)
+          const from = String(msg.fromUserId)
+          const to   = String(msg.toUserId)
+
+          // Skip messages we sent ourselves — already shown optimistically in sendMessage()
+          if (from === cu) return
+
+          // Determine the "other" party (always the sender, since we skipped our own)
+          const other = from
+          const su    = selectedUser.value ? String(selectedUser.value.id) : null
+
+          if (su && other === su) {
+            // Active conversation — append immediately (replace array to trigger reactivity)
+            messages.value = [...messages.value, msg]
+            scrollBottom()
+          } else {
+            // Not the open conversation — buffer it so it shows instantly on switch
+            const prev = pendingByUser.value[other] || []
+            pendingByUser.value = { ...pendingByUser.value, [other]: [...prev, msg] }
+          }
+        } catch { /* ignore malformed */ }
+      }
+    }
+
+    onMounted(async () => {
+      connectWs()
+      try {
+        const res  = await fetch('/users')
+        users.value = await res.json()
+      } catch { /**/ }
+    })
+
+    onUnmounted(() => { if (ws) ws.close() })
+
+    async function selectUser(user) {
+      selectedUser.value = user
+      messages.value     = []
+
+      // Flush any buffered messages for this contact right away
+      const uid     = String(user.id)
+      const buffered = pendingByUser.value[uid] || []
+      delete pendingByUser.value[uid]
+      pendingByUser.value = { ...pendingByUser.value }
+
+      try {
+        const res = await fetch(`/user/${props.currentUser.id}/${user.id}/conversation`)
+        if (res.ok) {
+          const history = await res.json()
+          // Merge history + any buffered real-time messages, deduplicate by id
+          const seen = new Set()
+          const merged = [...history, ...buffered].filter(m => {
+            const key = m.id || (m.fromUserId + m.toUserId + m.text + m.timestamp)
+            if (seen.has(key)) return false
+            seen.add(key)
+            return true
+          })
+          messages.value = merged
+        }
+      } catch { /**/ }
+      scrollBottom()
+    }
+
+    function sendMessage() {
+      const text = inputText.value.trim()
+      if (!text || !selectedUser.value || !ws || ws.readyState !== WebSocket.OPEN) return
+      const msg = {
+        toUserId:   String(selectedUser.value.id),
+        fromUserId: String(props.currentUser.id),
+        text
+      }
+      ws.send(JSON.stringify(msg))
+      // Optimistically show the sent message immediately — it will never echo back
+      // via WS since it's published to the recipient's exchange, not ours
+      messages.value = [...messages.value, { ...msg, timestamp: new Date().toISOString() }]
+      scrollBottom()
+      inputText.value = ''
+    }
+
+    function onKeydown(e) {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault()
+        sendMessage()
+      }
+    }
+
+    function isSent(msg) {
+      return String(msg.fromUserId) === String(props.currentUser.id)
+    }
+
+    function formatTime(ts) {
+      if (!ts) return ''
+      try {
+        const d = new Date(ts)
+        return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      } catch { return '' }
+    }
+
+    function scrollBottom() {
+      nextTick(() => {
+        if (messagesEl.value) messagesEl.value.scrollTop = messagesEl.value.scrollHeight
+      })
+    }
+
+    const otherUsers = computed(() =>
+      users.value.filter(u => String(u.id) !== String(props.currentUser.id))
+    )
+
+    // Badge count for contacts with pending (unread) messages
+    function pendingCount(user) {
+      return (pendingByUser.value[String(user.id)] || []).length
+    }
+
+    return {
+      users, otherUsers, selectedUser, messages, inputText,
+      wsConnected, messagesEl, pendingByUser,
+      selectUser, sendMessage, onKeydown, isSent, formatTime, pendingCount
+    }
+  },
+  template: `
+    <div class="chat-wrap">
+
+      <!-- Left: user list -->
+      <div class="user-list">
+        <div class="user-list-header">Contacts</div>
+        <ul>
+          <li class="me">{{ currentUser.name }} (you)</li>
+          <li
+            v-for="u in otherUsers"
+            :key="u.id"
+            :class="{ active: selectedUser && selectedUser.id === u.id }"
+            @click="selectUser(u)"
+          >
+            {{ u.name }}
+            <span v-if="pendingCount(u) > 0" style="float:right;background:#555;color:#fff;border-radius:10px;padding:1px 6px;font-size:0.7rem">
+              {{ pendingCount(u) }}
+            </span>
+          </li>
+        </ul>
+      </div>
+
+      <!-- Right: chat panel -->
+      <div class="chat-panel">
+        <div class="chat-header">
+          <span class="ws-dot" :class="{ connected: wsConnected }"></span>
+          <span v-if="selectedUser">
+            Chat with <strong>{{ selectedUser.name }}</strong>
+          </span>
+          <span v-else style="color:#bbb">Select a contact to start chatting</span>
+        </div>
+
+        <!-- Messages -->
+        <template v-if="selectedUser">
+          <div class="messages" ref="messagesEl">
+            <div
+              v-for="(msg, i) in messages"
+              :key="msg.id || i"
+              class="msg"
+              :class="isSent(msg) ? 'sent' : 'received'"
+            >
+              {{ msg.text }}
+              <div class="meta">{{ formatTime(msg.timestamp) }}</div>
+            </div>
+          </div>
+
+          <!-- Input bar -->
+          <div class="input-bar">
+            <input
+              v-model="inputText"
+              placeholder="Type a message…"
+              @keydown="onKeydown"
+              :disabled="!wsConnected"
+            />
+            <button
+              @click="sendMessage"
+              :disabled="!wsConnected || !inputText.trim()"
+            >Send</button>
+          </div>
+        </template>
+
+        <div v-else class="no-chat">← Pick someone to message</div>
+      </div>
+
+    </div>
+  `
+}
+
+// ── Root app ───────────────────────────────────────────────────────
+createApp({
+  components: { Landing, Chat },
+  setup() {
+    const currentUser = ref(null)
+    function onUserSelected(user) { currentUser.value = user }
+    return { currentUser, onUserSelected }
+  },
+  template: `
+    <Landing v-if="!currentUser" @user-selected="onUserSelected" />
+    <Chat    v-else :current-user="currentUser" />
+  `
+}).mount('#app')
+</script>
+</body>
+</html>
+
