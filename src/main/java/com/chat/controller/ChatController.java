@@ -3,6 +3,7 @@ package com.chat.controller;
 import com.chat.model.ChatMessage;
 import com.chat.service.GroupService;
 import com.chat.service.MessagingService;
+import com.chat.service.UserHttpClient;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.server.ServerRequest;
@@ -17,6 +18,7 @@ public class ChatController {
 
     private final GroupService groupService;
     private final MessagingService messagingService;
+    private final UserHttpClient userHttpClient;
 
     /** POST /api/groups  { name, createdBy, memberIds[] } */
     public Mono<ServerResponse> createGroup(ServerRequest req) {
@@ -65,6 +67,12 @@ public class ChatController {
                 req.pathVariable("groupId"),
                 Integer.parseInt(req.queryParam("limit").orElse("50"))
             ), ChatMessage.class);
+    }
+
+    public Mono<ServerResponse> listUsers(ServerRequest request) {
+        return userHttpClient
+                .getUsers()
+                .flatMap(ServerResponse.ok()::bodyValue);
     }
 
     public record CreateGroupRequest(String name, String createdBy, List<String> memberIds) {}

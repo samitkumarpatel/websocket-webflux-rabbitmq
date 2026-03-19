@@ -17,8 +17,8 @@ import java.util.Map;
 public class WebConfig {
 
     @Bean
-    public HandlerMapping wsMapping(ChatWebSocketHandler h) {
-        return new SimpleUrlHandlerMapping(Map.of("/ws/chat", h), -1);
+    public HandlerMapping wsMapping(ChatWebSocketHandler chatWebSocketHandler) {
+        return new SimpleUrlHandlerMapping(Map.of("/ws/chat", chatWebSocketHandler), -1);
     }
 
     @Bean
@@ -29,6 +29,7 @@ public class WebConfig {
     @Bean
     public RouterFunction<ServerResponse> routes(ChatController chatController) {
         return RouterFunctions.route()
+                .GET("/api/users", chatController::listUsers)
                 .POST("/api/groups", chatController::createGroup)
                 .POST("/api/groups/{groupId}/members", chatController::addMember)
                 .DELETE("/api/groups/{groupId}/members/{userId}", chatController::removeMember)

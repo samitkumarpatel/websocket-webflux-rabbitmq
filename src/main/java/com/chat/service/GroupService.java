@@ -2,6 +2,7 @@ package com.chat.service;
 
 import com.chat.model.Group;
 import com.chat.repository.GroupRepository;
+import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
@@ -18,6 +19,12 @@ public class GroupService {
 
     private final GroupRepository groupRepository;
     private final MessagingService messagingService;
+
+    @PostConstruct
+    public void init() {
+        // Ensure the shared membership topic exchange exists before any WS session starts
+        messagingService.ensureMembershipExchange();
+    }
 
     public Mono<Group> createGroup(String creatorId, String name, List<String> memberIds) {
         var group = new Group();
@@ -46,7 +53,12 @@ public class GroupService {
                 }
                 return groupRepository.save(group);
             })
-            .doOnSuccess(g -> log.info("User {} added to group {}", userId, groupId));
+            .doOnSuccess(g -> {
+                log.info("User {} added to group {}", userId, groupId);
+                // Notify any active WS session for this user so it can
+                // dynamically subscribe to the new group channel without reconnecting
+                messagingService.publishMembershipEvent(userId, groupId);
+            });
     }
 
     public Mono<Group> removeMember(String groupId, String userId) {

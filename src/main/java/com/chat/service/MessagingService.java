@@ -151,7 +151,7 @@ public class MessagingService {
     private Flux<ChatMessage> bindAndConsume(String exchange, String queuePrefix) {
         String queue = "ws." + queuePrefix + "." + UUID.randomUUID();
 
-        var q = QueueBuilder.nonDurable(queue).exclusive().autoDelete().build();
+        var q = QueueBuilder.nonDurable(queue).autoDelete().build();
         rabbitAdmin.declareQueue(q);
         rabbitAdmin.declareBinding(
             new Binding(queue, Binding.DestinationType.QUEUE, exchange, "", null)

@@ -12,6 +12,9 @@ import org.springframework.web.reactive.socket.WebSocketSession;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+
 /**
  * One WebSocket per user: ws://host/ws/chat?userId=alice
  *
@@ -54,18 +57,38 @@ public class ChatWebSocketHandler implements WebSocketHandler {
         // Flux.merge combines them all into a single stream → one WebSocket.
         // The client inspects message.type to know which panel to update.
 
+        // Track subscribed group IDs for this session to avoid duplicate subscriptions
+        // if a membership event fires more than once for the same group
+        Set<String> subscribedGroups = ConcurrentHashMap.newKeySet();
+
         Flux<String> dmStream = messagingService.subscribeToInbox(userId)
             .flatMap(m -> Mono.fromCallable(() -> objectMapper.writeValueAsString(m)));
 
+        // ── Groups known at connect time ────────────────────────────
         Flux<String> groupStreams = groupService.groupsForUser(userId)
             .flatMap(group -> {
-                // Ensure the exchange exists before subscribing
+                subscribedGroups.add(group.getId());
                 messagingService.ensureGroupExchange(group.getId());
                 return messagingService.subscribeToGroup(group.getId());
             })
             .flatMap(m -> Mono.fromCallable(() -> objectMapper.writeValueAsString(m)));
 
-        Flux<String> allOutbound = Flux.merge(dmStream, groupStreams);
+        // ── Groups added AFTER connect (dynamic late-join) ──────────
+        // subscribeToMembershipEvents emits a GroupMembershipEvent whenever this
+        // user is added to a new group while their WebSocket session is active.
+        // flatMap then subscribes to that group's channel on-the-fly without
+        // requiring the client to reconnect.
+        Flux<String> lateGroupStreams = messagingService.subscribeToMembershipEvents(userId)
+            .filter(event -> "ADDED".equals(event.action()))
+            .filter(event -> subscribedGroups.add(event.groupId())) // deduplicate
+            .flatMap(event -> {
+                log.info("User {} dynamically joined group {} — subscribing", userId, event.groupId());
+                messagingService.ensureGroupExchange(event.groupId());
+                return messagingService.subscribeToGroup(event.groupId());
+            })
+            .flatMap(m -> Mono.fromCallable(() -> objectMapper.writeValueAsString(m)));
+
+        Flux<String> allOutbound = Flux.merge(dmStream, groupStreams, lateGroupStreams);
 
         // ── Inbound: handle commands from client ────────────────────
         Mono<Void> inbound = session.receive()
